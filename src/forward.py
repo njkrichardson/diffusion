@@ -35,7 +35,7 @@ def bind_diffusion(num_timesteps: int, schedule: callable, **kwargs) -> callable
 
     posterior_variance: Tensor = betas * (1. - alphas_cumulative_product_previous) / (1. - alphas_cumulative_product)
 
-    def diffuse(x: Tensor, t: int, noise: Optional[Tensor]=None) -> Tensor: 
+    def diffuse(x: Tensor, t: int, noise: Optional[Tensor]=kwargs.get("noise", None)) -> Tensor: 
         if noise is None: 
             noise: Tensor = torch.randn_like(x) 
 
