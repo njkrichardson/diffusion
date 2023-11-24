@@ -4,6 +4,8 @@ from typing import Optional, Sequence, Union
 import torch 
 import torch.nn as nn 
 
+from constants import Tensor
+
 Module: type = nn.Module 
 
 @dataclass 
@@ -26,9 +28,9 @@ class AffineNet(Module):
 
         self.net: Module = nn.Sequential(*layers) 
 
-    def forward(x: Tensor, timestep: Tensor) -> Tensor: 
+    def forward(self, x: Tensor, timestep: Tensor) -> Tensor: 
         input: Tensor = torch.cat((x, timestep)) 
-        return sef.net(input) 
+        return self.net(input) 
 
 @dataclass 
 class MLPConfig: 
@@ -58,6 +60,6 @@ class MLP(Module):
 
         self.net: Module = nn.Sequential(*layers) 
 
-    def forward(x: Tensor, timestep: Tensor) -> Tensor: 
+    def forward(self, x: Tensor, timestep: Tensor) -> Tensor: 
         input: Tensor = torch.cat((x, timestep)) 
-        return sef.net(input) 
+        return self.net(input) 
