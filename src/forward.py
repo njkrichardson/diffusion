@@ -1,4 +1,4 @@
-from typing import Optional, Tuple 
+from typing import Optional, Sequence, Tuple 
 
 import torch 
 import torch.nn.functional as F 
@@ -23,7 +23,7 @@ def extract_timestep(batch: Tensor, timesteps: Tensor, shape: Tuple[int, ...]) -
     out: Tensor = batch.gather(-1, timesteps.cpu())
     return out.reshape(batch_size, *((1,) * (len(shape) - 1))).to(timesteps.device)
 
-def bind_diffusion(num_timesteps: int, schedule: callable, **kwargs) -> callable: 
+def bind_diffusion(num_timesteps: int, schedule: callable, **kwargs) -> Tuple[callable, callable]: 
     betas: Tensor = schedule(num_timesteps, **kwargs) 
     alphas: Tensor = 1. - betas 
     alphas_cumulative_product: Tensor = torch.cumprod(alphas, axis=0)
@@ -44,4 +44,35 @@ def bind_diffusion(num_timesteps: int, schedule: callable, **kwargs) -> callable
 
         return sqrt_alphas_cumulative_product_t * x + sqrt_one_minus_alphas_cumulative_product_t * noise 
 
-    return diffuse 
+    @torch.no_grad()
+    def sample(decoder: callable, x: Tensor, timesteps: Tensor, t_index: int) -> Tensor: 
+        betas_t: Tensor = extract_timestep(betas, timesteps, x.shape)
+        sqrt_one_minus_alphas_cumulative_product_t: Tensor = extract_timestep(sqrt_one_minus_alphas_cumulative_product, timesteps, x.shape)
+        sqrt_reciprocal_alphas_t: Tensor = extract_timestep(sqrt_reciprocal_alphas, timesteps, x.shape)
+        
+        predicted_noise: Tensor = decoder(x, timesteps)
+        mean: Tensor = sqrt_reciprocal_alphas_t * (x - betas_t * predicted_noise / sqrt_one_minus_alphas_cumulative_product_t)
+
+        if t_index == 0:
+            return mean
+        else:
+            posterior_variance_t: Tensor = extract_timestep(posterior_variance, timesteps, x.shape)
+            noise: Tensor = torch.randn_like(x)
+            return mean + torch.sqrt(posterior_variance_t) * noise 
+
+    @torch.no_grad()
+    def sample_batched(decoder: callable, shape: Sequence[int]) -> Tensor:
+        device: torch.device = next(decoder.parameters()).device
+
+        batch_size: int = shape[0]
+
+        # start from pure noise (for each example in the batch)
+        z: Tensor = torch.randn(shape, device=device)
+        samples: List[Tensor] = []
+
+        for i in reversed(range(0, num_timesteps)):
+            z = sample(decoder, z, torch.full((batch_size,), i, device=device, dtype=torch.long), i)
+            samples.append(z.cpu().numpy())
+        return samples
+
+    return diffuse, sample_batched

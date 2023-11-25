@@ -1,6 +1,7 @@
 import argparse 
 import logging
 from pathlib import Path 
+from typing import Tuple
 import sys 
 
 import torch 
@@ -13,7 +14,7 @@ from custom_tensorboard import SummaryWriter
 from forward import bind_diffusion, linear_schedule
 from nnets import AffineNetConfig, AffineNet
 from utils import TENSORBOARD_DIRECTORY, setup_logger, setup_experiment_directory
-from visuals import show_corruption
+from visuals import show_corruption, image_grid
 
 parser = argparse.ArgumentParser()
 
@@ -38,27 +39,21 @@ def main(args):
     log.info(f"GPU support: {'YES' if torch.cuda.is_available() else 'NO'}")
 
     # generate some synthetic data 
-    data_distribution: callable = lambda shape: torch.randn(*shape) + 5.
+    data_distribution: callable = lambda shape: torch.arange(2)[torch.multinomial(torch.tensor([0.2, 0.8]), torch.prod(torch.tensor(shape)), replacement=True)].reshape(*shape)
     num_observations: int = 100 
-    observation_dimension: int = 1 
-    observations: Tensor = data_distribution((num_observations, observation_dimension)).to(device) 
-    log.info(f"Sampled {num_observations} observations of dimension {observation_dimension}")
+    observation_dimensions: Tuple[int] = (10, 10) 
+    observations: Tensor = data_distribution((num_observations, *observation_dimensions)).to(device)
+    observations = observations.type(torch.float) 
+    log.info(f"Sampled {num_observations=} of {observation_dimensions=}")
 
     # instantiate encoder 
-    encoder: callable = bind_diffusion(args.num_timesteps, linear_schedule) 
-    log.info(f"Configured diffusion process with {args.num_timesteps} timesteps")
+    encoder, sample = bind_diffusion(args.num_timesteps, linear_schedule) 
+    log.info(f"Configured diffusion process with {args.num_timesteps=}")
 
     # instantiate decoder 
-    decoder_config: AffineNetConfig = AffineNetConfig(input_dimension=observation_dimension) 
+    decoder_config: AffineNetConfig = AffineNetConfig(input_dimension=observation_dimensions) 
     decoder: AffineNet = AffineNet(decoder_config)
     decoder.to(device) 
-
-    image: ndarray = show_corruption(encoder, observations[0], torch.tensor([25, 50, 100, 150, 200, 250, 299]), as_ndarray=True)
-    writer.image("Corruption", image) 
-    writer.close()
-
-    sys.exit(0)
-
 
     # configure optimizer 
     optimizer = Adam(decoder.parameters(), lr=args.step_size)
@@ -70,7 +65,7 @@ def main(args):
         # TODO batch 
         for i, batch in enumerate(observations): 
             optimizer.zero_grad()
-            batch_size: int = batch.shape[0]
+            batch_size: int = 1
             batch.to(device) 
 
             # sample (uniformly) a time-step for each observation in the batch 
@@ -86,6 +81,9 @@ def main(args):
 
         if epoch % args.report_every == 0: 
             log.info(f"Epoch [{epoch:04d}/{args.num_epochs:04d}]\tObjective: {(epoch_objective / num_batches).item():0.3f}")
+            samples = sample(decoder, (1, *observation_dimensions)) 
+            image: ndarray = image_grid([[samples[0], samples[100], samples[200], samples[300], samples[400], samples[499]]], as_ndarray=True)
+            writer.image("Samples", image, epoch)
 
     # TODO model saving
     writer.close()

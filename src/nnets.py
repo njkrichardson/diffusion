@@ -11,17 +11,20 @@ Module: type = nn.Module
 @dataclass 
 class AffineNetConfig: 
     input_dimension: Optional[int]=1 
-    hidden_dimensions: Optional[Sequence[int]]=(4, 4, 4) 
+    hidden_dimensions: Optional[Sequence[int]]=(100, 100) 
 
 class AffineNet(Module): 
     def __init__(self, config: AffineNetConfig): 
         super().__init__()
         self.config: AffineNetConfig = config 
+        # TODO, handle 2D transforms
+        self.config.input_dimension = torch.prod(torch.tensor(self.config.input_dimension))
         layers: Sequence[Module] = [
                 nn.Linear(self.config.input_dimension + 1, self.config.hidden_dimensions[0], bias=True), 
                 ]
         for input_dimension, output_dimension in zip(self.config.hidden_dimensions[:-1], self.config.hidden_dimensions[1:]): 
             layers.append(nn.Linear(input_dimension, output_dimension)) 
+            layers.append(nn.LeakyReLU())
 
         if self.config.hidden_dimensions[-1] != self.config.input_dimension: 
             layers.append(nn.Linear(self.config.hidden_dimensions[-1], self.config.input_dimension))
@@ -29,8 +32,10 @@ class AffineNet(Module):
         self.net: Module = nn.Sequential(*layers) 
 
     def forward(self, x: Tensor, timestep: Tensor) -> Tensor: 
-        input: Tensor = torch.cat((x, timestep)) 
-        return self.net(input) 
+        x_shape: Sequence[int] = x.shape
+        x = x.reshape(1, -1)
+        input: Tensor = torch.cat((x, timestep.reshape(1, 1)), -1) 
+        return self.net(input).reshape(x_shape)
 
 @dataclass 
 class MLPConfig: 
