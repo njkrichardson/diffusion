@@ -1,16 +1,19 @@
 import argparse 
 import logging
 from pathlib import Path 
+import sys 
 
 import torch 
 from torch.optim import Adam 
 from torch.utils.tensorboard import SummaryWriter
 
-from constants import Tensor 
+from constants import Tensor, ndarray
 from custom_objectives import score_matching_objective
+from custom_tensorboard import SummaryWriter
 from forward import bind_diffusion, linear_schedule
 from nnets import AffineNetConfig, AffineNet
 from utils import TENSORBOARD_DIRECTORY, setup_logger, setup_experiment_directory
+from visuals import show_corruption
 
 parser = argparse.ArgumentParser()
 
@@ -49,6 +52,13 @@ def main(args):
     decoder_config: AffineNetConfig = AffineNetConfig(input_dimension=observation_dimension) 
     decoder: AffineNet = AffineNet(decoder_config)
     decoder.to(device) 
+
+    image: ndarray = show_corruption(encoder, observations[0], torch.tensor([25, 50, 100, 150, 200, 250, 299]), as_ndarray=True)
+    writer.image("Corruption", image) 
+    writer.close()
+
+    sys.exit(0)
+
 
     # configure optimizer 
     optimizer = Adam(decoder.parameters(), lr=args.step_size)

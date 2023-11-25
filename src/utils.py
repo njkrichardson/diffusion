@@ -6,6 +6,8 @@ from typing import Any, List, Sequence, Tuple, Union
 
 import torch 
 
+from constants import Tensor
+
 # project directory configuration 
 SOURCE_DIRECTORY: Path = Path(__file__).parent.absolute()
 PROJECT_DIRECTORY: Path = SOURCE_DIRECTORY.parent.absolute() 
@@ -102,3 +104,7 @@ def setup_logger(name: str, level: int = logging.INFO, custom_handle: Path=None)
         logger.propagate = False
 
     return logger
+
+def corrupt(encoder: callable, x: Tensor, timestep: Tensor) -> Tensor: 
+    code: Tensor = encoder(x, timestep) 
+    return code 
