@@ -1,13 +1,15 @@
 from dataclasses import dataclass
+from functools import partial 
 from inspect import isfunction 
 import math 
-from typing import Any, Callable, List, Optional, Sequence, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 from einops import rearrange, reduce
 from einops.layers.torch import Rearrange
 import torch 
 import torch.nn as nn 
 import torch.nn.functional as F 
+from torch import einsum 
 
 from constants import Tensor
 
@@ -116,8 +118,8 @@ class ResnetBlock(Module):
             if exists(temporal_embedding_dimension)
             else None
         )
-        self.block1: Module = Block(input_dimension, output_dimension, groups=num_groups)
-        self.block2: Module = Block(input_dimension, output_dimension, groups=num_groups)
+        self.block1: Module = Block(input_dimension, output_dimension, num_groups=num_groups)
+        self.block2: Module = Block(output_dimension, output_dimension, num_groups=num_groups)
         self.residual_conv: Module = nn.Conv2d(input_dimension, output_dimension, 1) if input_dimension != output_dimension else nn.Identity()
 
     def forward(self, x: Tensor, temporal_embedding: Optional[Tensor]=None) -> Tensor:
@@ -201,7 +203,7 @@ class UNet(Module):
         init_dimension: Optional[int]=None,
         output_dimension: Optional[int]=None,
         scale_factors: Tuple[int]=(1, 2, 4, 8),
-        num_channels: Optional[int]=3,
+        num_channels: Optional[int]=1,
         self_condition: Optional[bool]=False,
         resnet_block_groups: Optional[int]=4,
         **kwargs, 
@@ -219,7 +221,7 @@ class UNet(Module):
         dimensions: List[int] = [init_dimension, *map(lambda m: input_dimension * m, scale_factors)]
         input_output_dimensions: List[Tuple[int]] = list(zip(dimensions[:-1], dimensions[1:]))
 
-        block_klass: Module = partial(ResnetBlock, groups=resnet_block_groups)
+        block_klass: Module = partial(ResnetBlock, num_groups=resnet_block_groups)
 
         # time embeddings
         temporal_embedding_dimension: int = input_dimension * 4
@@ -245,7 +247,7 @@ class UNet(Module):
                         block_klass(in_dimension, in_dimension, temporal_embedding_dimension=temporal_embedding_dimension),
                         block_klass(in_dimension, in_dimension, temporal_embedding_dimension=temporal_embedding_dimension),
                         Residual(PreNorm(in_dimension, LinearAttention(in_dimension))),
-                        Downsample(in_dimension, out_dimension)
+                        downsample(in_dimension, out_dimension)
                         if not is_last
                         else nn.Conv2d(in_dimension, out_dimension, 3, padding=1),
                     ]
@@ -266,7 +268,7 @@ class UNet(Module):
                         block_klass(out_dimension + in_dimension, out_dimension, temporal_embedding_dimension=temporal_embedding_dimension),
                         block_klass(out_dimension + in_dimension, out_dimension, temporal_embedding_dimension=temporal_embedding_dimension),
                         Residual(PreNorm(out_dimension, LinearAttention(out_dimension))),
-                        Upsample(out_dimension, in_dimension)
+                        upsample(out_dimension, in_dimension)
                         if not is_last
                         else nn.Conv2d(out_dimension, in_dimension, 3, padding=1),
                     ]
@@ -285,7 +287,6 @@ class UNet(Module):
 
         x = self.init_conv(x)
         r = x.clone()
-
         t = self.time_mlp(time)
 
         h = []
@@ -300,9 +301,11 @@ class UNet(Module):
 
             x = downsample(x)
 
+
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t)
+
 
         for block1, block2, attn, upsample in self.upsamplers:
             x = torch.cat((x, h.pop()), dim=1)
@@ -315,7 +318,6 @@ class UNet(Module):
             x = upsample(x)
 
         x = torch.cat((x, r), dim=1)
-
         x = self.final_res_block(x, t)
         return self.final_conv(x)
 
