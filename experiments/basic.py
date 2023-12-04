@@ -7,13 +7,15 @@ from torchvision.transforms import Compose, ToTensor, Lambda, ToPILImage, Center
 from video_diffusion_pytorch import Unet3D, GaussianDiffusion, Trainer
 
 from constants import Module, Tensor
+from custom_tensorboard import SummaryWriter
 from data_transforms import ControlDataset
-from utils import DATA_DIRECTORY, setup_logger
+from utils import DATA_DIRECTORY, TENSORBOARD_DIRECTORY, setup_logger, setup_experiment_directory
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model-dimension", type=int, default=32)
-parser.add_argument("--num-timesteps", "-t", type=int, default=1_000)
-parser.add_argument("--batch-size", type=int, default=32)
+parser.add_argument("--num-timesteps", "-t", type=int, default=1000)
+parser.add_argument("--batch-size", type=int, default=1)
+parser.add_argument("--channels", type=int, default=1)
 
 transform: Module = Compose([
     Lambda(lambda value: (value * 2) - 1),
@@ -27,23 +29,26 @@ reverse_transform: Module = Compose([
 
 def main(args): 
     # configure logging 
-    log = setup_logger(__name__) 
+    experiment_directory: Path = setup_experiment_directory("control_unconditional")
+    log: logging.Logger = setup_logger(__name__, custom_handle=experiment_directory / "log.out")
+    writer: SummaryWriter = SummaryWriter(log_dir=TENSORBOARD_DIRECTORY)
 
     # configure GPU support 
     device: torch.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu") 
     log.info(f"GPU support: {'YES' if torch.cuda.is_available() else 'NO'}")
-
 
     # load the dataset 
     dataset_path: Path = DATA_DIRECTORY / "videos.pkl" 
     dataset: Dataset = ControlDataset(dataset_path, transform, device) 
 
     # configure the model 
-    model = Unet3D(dim=args.model_dimension, dim_mults = (1, 2, 4))
+    model = Unet3D(dim=args.model_dimension, channels=args.channels, dim_mults = (1, 2, 4, 8))
     model.to(device)
 
+    # TODO add channels! 
     diffusion = GaussianDiffusion(
         model,
+        channels=args.channels, 
         image_size=dataset.frame_height,
         num_frames=dataset.frames_per_video,
         timesteps=args.num_timesteps,   
@@ -63,7 +68,8 @@ def main(args):
         amp = True                        # turn on mixed precision
     )
 
-    trainer.train(log_fn=log.info)
+    trainer.train(log_fn=log.info, writer=writer)
+    writer.close()
 
 if __name__=="__main__": 
     args = parser.parse_args()
