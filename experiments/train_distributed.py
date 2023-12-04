@@ -30,14 +30,18 @@ parser.add_argument("--num-to-sample", type=int, default=2)
 
 parser.add_argument_group(title="Training")
 parser.add_argument("--num-epochs", type=int, default=10_000)
+parser.add_argument("--no-amp", action="store_true")
 parser.add_argument("--batch-size", type=int, default=1)
+parser.add_argument("--step-size", type=float, default=1e-04)
 parser.add_argument("--ema-decay", type=float, default=0.995)
 parser.add_argument("--update-ema-every", type=int, default=10)
 parser.add_argument("--step-start-ema", type=int, default=2_000)
+parser.add_argument("--gradient-accumulate-every", type=int, default=2)
+parser.add_argument("--focus-present", type=float, default=0.)
 
 parser.add_argument_group(title="Data")
 parser.add_argument("--data-dir", type=str, default="no_obstacles_64")
-parser.add_argument("--channels", type=int, default=1)
+parser.add_argument("--num-channels", type=int, default=1)
 parser.add_argument("--image-size", type=int, default=64)
 parser.add_argument("--frames-per-video", type=int, default=20)
 
@@ -199,13 +203,13 @@ def main(args):
     log.info(f"GPUs Available: {torch.cuda.device_count()}")
 
     # configure the model 
-    unet = Unet3D(dim=args.model_dimension, channels=args.channels, dim_mults = (1, 2, 4, 8))
+    unet = Unet3D(dim=args.model_dimension, channels=args.num_channels, dim_mults = (1, 2, 4, 8))
     unet.to(device)
 
     # TODO add channels! 
     diffusion = GaussianDiffusion(
         unet,
-        channels=args.channels, 
+        channels=args.num_channels, 
         image_size=args.image_size,
         num_frames=args.frames_per_video,
         timesteps=args.num_timesteps,   
@@ -214,70 +218,80 @@ def main(args):
     diffusion.to(device)
 
     model = diffusion
+
+    # configure exponential moving-average 
     ema = EMA(args.ema_decay)
     ema_model = copy.deepcopy(model)
-    update_ema_every: int = args.update_ema_every
-    step_start_ema: int = args.step_start_ema 
-    save_and_sample_every: int = args.sample_every
+    ema_model.load_state_dict(model.state_dict())
 
+    # configure dataset 
+    dataset: Dataset = ControlDataset(args.data_dir, args.image_size, channels=args.num_channels, num_frames=args.frames_per_video)
+    num_videos: int = len(dataset)
+    log.info(f"Found {num_videos=} videos at {args.data_dir=}")
+    assert num_videos >= 1 
+    dataloader: DataLoader = cycle(DataLoader(dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True))
 
-        num_frames = 16,
-        train_batch_size = 32,
-        train_lr = 1e-4,
-        train_num_steps = 100000,
-        gradient_accumulate_every = 2,
-        amp = False,
-        results_folder = './results',
-        num_sample_rows = 4,
-        max_grad_norm = None
+    # configure optimizer
+    optimizer = Adam(model.parameters(), lr=args.step_size)
+    step: int = 0 
 
-        self.batch_size = train_batch_size
-        self.image_size = diffusion_model.image_size
-        self.gradient_accumulate_every = gradient_accumulate_every
-        self.train_num_steps = train_num_steps
+    # gradient scaling 
+    gradient_scaler: GradScaler = GradScaler(enabled=(not args.no_amp))
+    max_gradient_norm: float = None
 
-        image_size = diffusion_model.image_size
-        channels = diffusion_model.channels
-        num_frames = diffusion_model.num_frames
+    while step < args.num_epochs:
+        for i in range(args.gradient_accumulate_every):
+            batch: Tensor = next(dataloader).cuda()
 
-        self.ds = ControlDataset(folder, image_size, channels = channels, num_frames = num_frames)
+            with autocast(enabled=(not args.no_amp)):
+                loss: Tensor = model(batch, prob_focus_present=args.focus_present, focus_present_mask=None)
+                scaled_loss: Tensor = gradient_scaler.scale(loss / args.gradient_accumulate_every)
+                scaled_loss.backward()
 
-        print(f'found {len(self.ds)} videos as gif files at {folder}')
-        assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
+        log.info(f"Iteration [{step:05d}/{args.num_epochs:05d}]:\t{loss.item():0.4f}")
+        
+        if writer is not None: 
+            writer.scalar("Objective", loss.item(), step=step)
 
-        self.dl = cycle(DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True))
-        self.opt = Adam(diffusion_model.parameters(), lr = train_lr)
+        if exists(max_gradient_norm):
+            gradient_scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), max_gradient_norm)
 
-        self.step = 0
+        gradient_scaler.step(optimizer)
+        gradient_scaler.update()
+        optimizer.zero_grad()
 
-        self.amp = amp
-        self.scaler = GradScaler(enabled = amp)
-        self.max_grad_norm = max_grad_norm
+        if step % args.update_ema_every == 0:
+            if step < args.step_start_ema:
+                ema_model.load_state_dict(model.state_dict())
+            else: 
+                ema.update_model_average(ema_model, model)
 
-        self.num_sample_rows = num_sample_rows
-        self.results_folder = Path(results_folder)
-        self.results_folder.mkdir(exist_ok = True, parents = True)
+        if step != 0 and step % args.sample_every == 0:
+            milestone: int = step // args.sample_every
+            num_samples: int = args.num_to_sample ** 2
+            batches = num_to_groups(num_samples, args.batch_size)
 
-        self.reset_parameters()
+            all_videos_list = list(map(lambda n: ema_model.sample(batch_size=n), batches))
+            all_videos_list = torch.cat(all_videos_list, dim = 0)
 
-    def reset_parameters(self):
-        self.ema_model.load_state_dict(self.model.state_dict())
+            all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
 
-#    trainer = Trainer(
-#        diffusion,
-#        (DATA_DIRECTORY / f"{args.data_dir}").as_posix(),                         # this folder path needs to contain all your training data, as .gif files, of correct image size and number of frames
-#        train_batch_size = args.batch_size,
-#        train_lr = 1e-4,
-#        results_folder=experiment_directory.as_posix(), 
-#        save_and_sample_every=args.sample_every,
-#        train_num_steps = args.num_epochs,         # total training steps
-#        gradient_accumulate_every = 2,    # gradient accumulation steps
-#        num_sample_rows=args.num_to_sample, 
-#        ema_decay = 0.995,                # exponential moving average decay
-#        amp = True                        # turn on mixed precision
-#    )
-#
-#    trainer.train(log_fn=log.info, writer=writer)
+            one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=args.num_to_sample)
+            video_path = str(experiment_directory / str(f'{milestone}.gif'))
+            video_tensor_to_gif(one_gif, video_path)
+            checkpoint_data: dict = {
+                'step': step,
+                'model': model.state_dict(),
+                'ema': ema_model.state_dict(),
+                'scaler': scaler.state_dict()
+            }
+            torch.save(data, str(experiment_directory / f'checkpoint-{milestone}.pt'))
+
+        step += 1
+
+    log_fn('training completed')
+
     writer.close()
 
 if __name__=="__main__": 
