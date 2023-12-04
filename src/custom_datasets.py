@@ -6,7 +6,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms as T
 
 from constants import Tensor
-from trainer import cast_num_frames, identity, gif_to_tensor
+from train_utils import cast_num_frames, identity, gif_to_tensor
 
 class ControlDataset(Dataset):
     def __init__(

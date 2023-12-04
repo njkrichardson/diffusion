@@ -16,7 +16,7 @@ from video_diffusion_pytorch import Unet3D, GaussianDiffusion
 from constants import Module, Tensor
 from custom_datasets import ControlDataset
 from custom_tensorboard import SummaryWriter
-from trainer import EMA, CHANNELS_TO_MODE, cycle, seek_all_images, gif_to_tensor, video_tensor_to_gif, num_to_groups, noop, cast_num_frames, identity, exists
+from train_utils import EMA, CHANNELS_TO_MODE, cycle, seek_all_images, gif_to_tensor, video_tensor_to_gif, num_to_groups, noop, cast_num_frames, identity, exists
 from utils import DATA_DIRECTORY, TENSORBOARD_DIRECTORY, setup_logger, setup_experiment_directory, get_now_str
 
 parser = argparse.ArgumentParser()
