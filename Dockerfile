@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ubuntu:22.04
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
 
 RUN apt-get update && apt-get install --yes \
     build-essential \
@@ -8,14 +8,16 @@ RUN apt-get update && apt-get install --yes \
     zsh \
     wget \
     curl \
+    direnv \
     git \
-    ninja-build \ 
+    ninja-build \
     gettext \
     cmake \
     unzip \
-    parallel \ 
+    parallel \
     npm \
     python3-venv \
+    python3-pip \
     vim 
 
 # configure zsh 

@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Optional, Tuple, Union
 
 import numpy as np
@@ -6,6 +7,7 @@ from torch.utils.data import Dataset
 from torchvision.transforms import Compose, ToTensor, Lambda, ToPILImage, CenterCrop, Resize
 
 from constants import Module, Tensor
+from utils import deserialize
 
 def close_transform(image_dimension: int) -> Tuple[Module]: 
     transform: Module = Compose([
@@ -43,3 +45,44 @@ class MonochromeDataset(Dataset):
             x = self.transform(x) 
 
         return x 
+
+class ControlDataset(Dataset): 
+    def __init__(self, path: Path, transform: Module, device: torch.device): 
+        self.path: Path = path 
+        self.device: torch.device = device 
+        self.transform: Module = transform 
+        self.data: Tensor = torch.from_numpy(deserialize(self.path))
+        
+        # TODO use FP32 on generation 
+
+    def __len__(self) -> int: 
+        return self.data.shape[0] 
+
+    @property 
+    def frame_width(self) -> int: 
+        return self.data[0].shape[3] 
+
+    @property 
+    def frame_height(self) -> int: 
+        return self.data[0].shape[2] 
+
+    @property 
+    def frames_per_video(self) -> int: 
+        return self.data[0].shape[1] 
+
+    @property 
+    def num_channels(self) -> int: 
+        return self.data[0].shape[0] 
+
+    def __getitem__(self, index: Union[Tensor, int]) -> Tensor: 
+        if torch.is_tensor(index): 
+            index.tolist()
+            x: Tensor = self.data[index] 
+        else: 
+            x: Tensor = self.data[index][None, ...]
+
+        if self.transform: 
+            x = x.type(torch.float32) 
+            x = self.transform(x) 
+
+        return x.to(self.device) 
