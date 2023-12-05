@@ -27,10 +27,8 @@ from trainer import TrainerConfig, Trainer
 from train_utils import EMA, CHANNELS_TO_MODE, cycle, seek_all_images, gif_to_tensor, video_tensor_to_gif, num_to_groups, noop, cast_num_frames, identity, exists
 from utils import DATA_DIRECTORY, TENSORBOARD_DIRECTORY, setup_logger, setup_experiment_directory, get_now_str
 
-def ddp_setup(rank: int, world_size: int): 
-    os.environ["MASTER_ADDR"] = "localhost" 
-    os.environ["MASTER_PORT"] = "12355"
-    init_process_group(backend="nccl", rank=rank, world_size=world_size)
+def ddp_setup(): 
+    init_process_group(backend="nccl")
 
 parser = argparse.ArgumentParser()
 parser.add_argument_group(title="Architecture")
@@ -54,7 +52,7 @@ parser.add_argument("--focus-present", type=float, default=0.)
 
 parser.add_argument_group(title="Distributed Training")
 parser.add_argument("--distributed", action="store_true", help="Enable multi-gpu training.")
-#parser.add_argument("--rank", type=int, default=0, help="Process rank.")
+parser.add_argument("--from-checkpoint", type=str, default=None, help="Path to experiment directory with snapshots.")
 
 parser.add_argument_group(title="Data")
 parser.add_argument("--data-dir", type=str, default="no_obstacles_64")
@@ -62,7 +60,7 @@ parser.add_argument("--num-channels", type=int, default=1)
 parser.add_argument("--image-size", type=int, default=64)
 parser.add_argument("--frames-per-video", type=int, default=20)
 
-def main(rank: int, args, experiment_directory, world_size: Optional[int]=0): 
+def main(args, experiment_directory): 
     log = setup_logger(__name__, custom_handle=experiment_directory / "log.out")
     log.info("logger online")
     log_fn = log.info 
@@ -70,13 +68,13 @@ def main(rank: int, args, experiment_directory, world_size: Optional[int]=0):
     # configure distributed training 
     if args.distributed: 
         log_fn("running distributed!")
-        log_fn(f"Device {rank} online")
-        ddp_setup(rank, world_size)
+        log_fn(f"Device {os.environ['LOCAL_RANK']} online")
+        ddp_setup()
         log_fn("Set up DDP")
 
 
     # configure logging 
-    if args.distributed and rank != 0: 
+    if args.distributed and int(os.environ["LOCAL_RANK"]) != 0: 
         writer: SummaryWriter = None
     else: 
         writer: SummaryWriter = SummaryWriter(log_dir=TENSORBOARD_DIRECTORY / get_now_str())
@@ -91,7 +89,7 @@ def main(rank: int, args, experiment_directory, world_size: Optional[int]=0):
     unet = Unet3D(dim=args.model_dimension, channels=args.num_channels, dim_mults = (1, 2, 4, 8))
 
     if args.distributed: 
-        unet.to(rank)
+        unet.to(int(os.environ["LOCAL_RANK"]))
     else: 
         unet.to(device)
 
@@ -139,14 +137,14 @@ def main(rank: int, args, experiment_directory, world_size: Optional[int]=0):
             ema=ema, 
             ema_model=ema_model, 
             gradient_scaler=gradient_scaler,
-            device_id=rank if args.distributed else torch.cuda.current_device(), 
-            checkpoint_every=args.sample_every, 
-            log=log_fn, 
-            experiment_directory=experiment_directory, 
             batch_size=args.batch_size, 
             num_to_sample=args.num_to_sample, 
-            writer=writer, 
+            device_id=int(os.environ["LOCAL_RANK"]) if args.distributed else torch.cuda.current_device(), 
+            checkpoint_every=args.sample_every, 
             distributed=args.distributed, 
+            log=log_fn, 
+            experiment_directory=experiment_directory, 
+            writer=writer, 
             gradient_accumulate_every=args.gradient_accumulate_every, 
             max_gradient_norm=max_gradient_norm, 
             present_focus_probability=args.focus_present
@@ -158,10 +156,9 @@ def main(rank: int, args, experiment_directory, world_size: Optional[int]=0):
 
 if __name__=="__main__": 
     args = parser.parse_args()
-    experiment_directory: Path = setup_experiment_directory("control_unconditional")
+    if args.from_checkpoint is not None: 
+        experiment_directory = Path(args.from_checkpoint)
+    else: 
+        experiment_directory: Path = setup_experiment_directory("control_unconditional", exists_ok=True)
 
-    if args.distributed: 
-        world_size: int = torch.cuda.device_count()
-        mp.spawn(main, args=(args, experiment_directory, world_size,), nprocs=world_size)
-
-    main(0, args)
+    main(args, experiment_directory)

@@ -53,7 +53,7 @@ def human_seconds_str(seconds: int) -> str:
 def get_now_str() -> str:
     return datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
-def setup_experiment_directory(application: str) -> Path: 
+def setup_experiment_directory(application: str, exists_ok=False) -> Path: 
     now: str = get_now_str()
     prefix_dir: Path = LOG_DIRECTORY / application
 
@@ -61,7 +61,7 @@ def setup_experiment_directory(application: str) -> Path:
         prefix_dir.mkdir(exist_ok=False)
 
     directory: Path = prefix_dir / now 
-    directory.mkdir(exist_ok=False)
+    directory.mkdir(exist_ok=exists_ok)
     return directory
 
 def level_from_args(args) -> int:
