@@ -16,6 +16,7 @@ from video_diffusion_pytorch import Unet3D, GaussianDiffusion
 from constants import Module, Tensor
 from custom_datasets import ControlDataset
 from custom_tensorboard import SummaryWriter
+from trainer import TrainerConfig, Trainer
 from train_utils import EMA, CHANNELS_TO_MODE, cycle, seek_all_images, gif_to_tensor, video_tensor_to_gif, num_to_groups, noop, cast_num_frames, identity, exists
 from utils import DATA_DIRECTORY, TENSORBOARD_DIRECTORY, setup_logger, setup_experiment_directory, get_now_str
 
@@ -29,7 +30,7 @@ parser.add_argument("--sample-every", type=int, default=1000)
 parser.add_argument("--num-to-sample", type=int, default=2)
 
 parser.add_argument_group(title="Training")
-parser.add_argument("--num-epochs", type=int, default=10_000)
+parser.add_argument("--num-steps", type=int, default=10_000, help="Number of steps to train the model.")
 parser.add_argument("--no-amp", action="store_true")
 parser.add_argument("--batch-size", type=int, default=1)
 parser.add_argument("--step-size", type=float, default=1e-04)
@@ -94,58 +95,79 @@ def main(args):
     gradient_scaler: GradScaler = GradScaler(enabled=(not args.no_amp))
     max_gradient_norm: float = None
 
-    while step < args.num_epochs:
-        for i in range(args.gradient_accumulate_every):
-            batch: Tensor = next(dataloader).cuda()
+    # configure the trainer 
+    trainer_config: TrainerConfig = TrainerConfig(
+            model=model, 
+            datalodder=dataloader, 
+            optimizer=optimizer, 
+            ema=ema, 
+            ema_model=ema_model, 
+            gradient_scaler=gradient_scaler,
+            device_id=torch.cuda.current_device(), 
+            checkpoint_every=args.sample_every, 
+            log=log, 
+            experiment_directory=experiment_directory, 
+            num_to_sample=args.num_to_sample, 
+            writer=writer, 
+            gradient_accumulate_every=args.gradient_accumulate_every, 
+            max_gradient_norm=max_gradient_norm, 
+            present_focus_probability=args.focus_present
+            )
+    trainer: Trainer = Trainer(trainer_config)
+    trainer.train(args.num_steps)
 
-            with autocast(enabled=(not args.no_amp)):
-                loss: Tensor = model(batch, prob_focus_present=args.focus_present, focus_present_mask=None)
-                scaled_loss: Tensor = gradient_scaler.scale(loss / args.gradient_accumulate_every)
-                scaled_loss.backward()
-
-        log.info(f"Iteration [{step:05d}/{args.num_epochs:05d}]:\t{loss.item():0.4f}")
-        
-        if writer is not None: 
-            writer.scalar("Objective", loss.item(), step=step)
-
-        if exists(max_gradient_norm):
-            gradient_scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_gradient_norm)
-
-        gradient_scaler.step(optimizer)
-        gradient_scaler.update()
-        optimizer.zero_grad()
-
-        if step % args.update_ema_every == 0:
-            if step < args.step_start_ema:
-                ema_model.load_state_dict(model.state_dict())
-            else: 
-                ema.update_model_average(ema_model, model)
-
-        if step != 0 and step % args.sample_every == 0:
-            milestone: int = step // args.sample_every
-            num_samples: int = args.num_to_sample ** 2
-            batches = num_to_groups(num_samples, args.batch_size)
-
-            all_videos_list = list(map(lambda n: ema_model.sample(batch_size=n), batches))
-            all_videos_list = torch.cat(all_videos_list, dim = 0)
-
-            all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
-
-            one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=args.num_to_sample)
-            video_path = str(experiment_directory / str(f'{milestone}.gif'))
-            video_tensor_to_gif(one_gif, video_path)
-            checkpoint_data: dict = {
-                'step': step,
-                'model': model.state_dict(),
-                'ema': ema_model.state_dict(),
-                'scaler': gradient_scaler.state_dict()
-            }
-            torch.save(checkpoint_data, str(experiment_directory / f'checkpoint-{milestone}.pt'))
-
-        step += 1
-
-    log_fn('training completed')
+#    while step < args.num_epochs:
+#        for i in range(args.gradient_accumulate_every):
+#            batch: Tensor = next(dataloader).cuda()
+#
+#            with autocast(enabled=(not args.no_amp)):
+#                loss: Tensor = model(batch, prob_focus_present=args.focus_present, focus_present_mask=None)
+#                scaled_loss: Tensor = gradient_scaler.scale(loss / args.gradient_accumulate_every)
+#                scaled_loss.backward()
+#
+#        log.info(f"Iteration [{step:05d}/{args.num_epochs:05d}]:\t{loss.item():0.4f}")
+#        
+#        if writer is not None: 
+#            writer.scalar("Objective", loss.item(), step=step)
+#
+#        if exists(max_gradient_norm):
+#            gradient_scaler.unscale_(optimizer)
+#            nn.utils.clip_grad_norm_(model.parameters(), max_gradient_norm)
+#
+#        gradient_scaler.step(optimizer)
+#        gradient_scaler.update()
+#        optimizer.zero_grad()
+#
+#        if step % args.update_ema_every == 0:
+#            if step < args.step_start_ema:
+#                ema_model.load_state_dict(model.state_dict())
+#            else: 
+#                ema.update_model_average(ema_model, model)
+#
+#        if step != 0 and step % args.sample_every == 0:
+#            milestone: int = step // args.sample_every
+#            num_samples: int = args.num_to_sample ** 2
+#            batches = num_to_groups(num_samples, args.batch_size)
+#
+#            all_videos_list = list(map(lambda n: ema_model.sample(batch_size=n), batches))
+#            all_videos_list = torch.cat(all_videos_list, dim = 0)
+#
+#            all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
+#
+#            one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=args.num_to_sample)
+#            video_path = str(experiment_directory / str(f'{milestone}.gif'))
+#            video_tensor_to_gif(one_gif, video_path)
+#            checkpoint_data: dict = {
+#                'step': step,
+#                'model': model.state_dict(),
+#                'ema': ema_model.state_dict(),
+#                'scaler': gradient_scaler.state_dict()
+#            }
+#            torch.save(checkpoint_data, str(experiment_directory / f'checkpoint-{milestone}.pt'))
+#
+#        step += 1
+#
+#    log_fn('training completed')
 
     writer.close()
 
