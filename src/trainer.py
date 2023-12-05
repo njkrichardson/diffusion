@@ -7,6 +7,7 @@ from einops import rearrange
 import torch 
 from torch.utils.data import Dataset, DataLoader 
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP 
 
 from constants import Module, Optimizer, Tensor
 from custom_tensorboard import SummaryWriter
@@ -26,6 +27,9 @@ class TrainerConfig:
     experiment_directory: Path
     num_to_sample: Optional[int]=2
     writer: Optional[SummaryWriter]=None
+    distributed: Optional[bool]=False
+    update_ema_every: Optional[int]=10
+    step_start_ema: Optional[int]=2000
     gradient_accumulate_every: Optional[int]=2 
     max_gradient_norm: Optional[float] = None
     present_focus_probability: Optional[float]=0.
@@ -37,13 +41,19 @@ class Trainer:
     def __init__(self, config: TrainerConfig): 
         self.config = config 
         self.optimizer: Optimizer = self.config.optimizer
+
+        # enable DDP 
         self.model: Module = self.config.model.to(self.config.device_id)
+        
+        if self.config.distributed: 
+            self.model = DDP(self.model, device_ids=[self.config.device_id])
+
         self.dataloader: DataLoader = self.config.dataloader
         self.ema: Module = self.config.ema 
         self.ema_model: Module = self.config.ema_model
         self.gradient_scaler: Module = self.config.gradient_scaler
         self.device_id: int = self.config.device_id
-        self.save_every: int = self.config.save_every
+        self.checkpoint_every: int = self.config.checkpoint_every
         self.log: logging.Logger = self.config.log 
         self.writer = self.config.writer 
 
@@ -53,7 +63,7 @@ class Trainer:
                 prob_focus_present=self.config.present_focus_probability, 
                 focus_present_mask=self.config.present_focus_mask
                 )
-        scaled_objective: Tensor = self.gradient_scaler.scale(loss / self.config.gradient_accumulate_every)
+        scaled_objective: Tensor = self.gradient_scaler.scale(objective / self.config.gradient_accumulate_every)
         scaled_objective.backward()
         self.current_objective: float = objective.item()
 
@@ -72,7 +82,7 @@ class Trainer:
         self.gradient_scaler.update()
 
     def _save_checkpoint(self, step: int): 
-        if step != 0 and step % self.config.sample_every == 0:
+        if step != 0 and step % self.config.sample_every == 0 and self.device_id == 0:
             milestone: int = step // self.config.sample_every
             num_samples: int = self.config.num_to_sample ** 2
             batches = num_to_groups(num_samples, self.config.batch_size)
@@ -86,7 +96,7 @@ class Trainer:
             video_tensor_to_gif(one_gif, video_path)
             checkpoint_data: dict = {
                 'step': step,
-                'model': self.model.state_dict(),
+                'model': self.model.module.state_dict() if self.config.distributed else self.model.state_dict(),
                 'ema': self.ema_model.state_dict(),
                 'scaler': self.gradient_scaler.state_dict()
             }
@@ -95,14 +105,16 @@ class Trainer:
     def train(self, num_steps: int): 
         for step in range(num_steps): 
             self._run_step(step) 
-            log.info(f"GPU{self.config.device_id} | Iteration [{step:05d}/{num_epochs:05d}] | Objective: {self.current_objective:0.4f}")
+
+            self.log.info(f"GPU{self.config.device_id} | Iteration [{step:05d}/{num_steps:05d}] | Objective: {self.current_objective:0.4f}")
+            print(f"GPU{self.config.device_id} | Iteration [{step:05d}/{num_steps:05d}] | Objective: {self.current_objective:0.4f}")
 
             if self.writer is not None: 
                 self.writer.scalar("Objective", self.current_objective, step=step)
 
             if step % self.config.update_ema_every == 0:
                 if step < self.config.step_start_ema:
-                    self.ema_model.load_state_dict(self.model.state_dict())
+                    self.ema_model.load_state_dict(self.model.module.state_dict())
                 else: 
                     self.ema.update_model_average(self.ema_model, self.model)
 
