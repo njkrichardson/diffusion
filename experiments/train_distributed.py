@@ -62,15 +62,18 @@ parser.add_argument("--num-channels", type=int, default=1)
 parser.add_argument("--image-size", type=int, default=64)
 parser.add_argument("--frames-per-video", type=int, default=20)
 
-def main(rank: int, args, log, experiment_directory, world_size: Optional[int]=0): 
+def main(rank: int, args, experiment_directory, world_size: Optional[int]=0): 
+    log = setup_logger(__name__, custom_handle=experiment_directory / "log.out")
+    log.info("logger online")
+    log_fn = log.info 
+
     # configure distributed training 
     if args.distributed: 
-        print("running distributed!")
-        print(f"Device {rank} online")
-        log.info(f"Device {rank} online")
+        log_fn("running distributed!")
+        log_fn(f"Device {rank} online")
         ddp_setup(rank, world_size)
-        log.info("Set up DDP")
-        print("Set up DDP")
+        log_fn("Set up DDP")
+
 
     # configure logging 
     if args.distributed and rank != 0: 
@@ -112,8 +115,7 @@ def main(rank: int, args, log, experiment_directory, world_size: Optional[int]=0
     data_directory = DATA_DIRECTORY / f"{args.data_dir}"
     dataset: Dataset = ControlDataset(data_directory, args.image_size, channels=args.num_channels, num_frames=args.frames_per_video)
     num_videos: int = len(dataset)
-    log.info(f"Found {num_videos=} videos at {data_directory=}")
-    print(f"Found {num_videos=} videos at {data_directory=}")
+    log_fn(f"Found {num_videos=} videos at {data_directory=}")
     assert num_videos >= 1 
 
     if args.distributed: 
@@ -139,8 +141,9 @@ def main(rank: int, args, log, experiment_directory, world_size: Optional[int]=0
             gradient_scaler=gradient_scaler,
             device_id=rank if args.distributed else torch.cuda.current_device(), 
             checkpoint_every=args.sample_every, 
-            log=log, 
+            log=log_fn, 
             experiment_directory=experiment_directory, 
+            batch_size=args.batch_size, 
             num_to_sample=args.num_to_sample, 
             writer=writer, 
             distributed=args.distributed, 
@@ -156,10 +159,9 @@ def main(rank: int, args, log, experiment_directory, world_size: Optional[int]=0
 if __name__=="__main__": 
     args = parser.parse_args()
     experiment_directory: Path = setup_experiment_directory("control_unconditional")
-    log: logging.Logger = setup_logger(__name__, custom_handle=experiment_directory / "log.out")
 
     if args.distributed: 
         world_size: int = torch.cuda.device_count()
-        mp.spawn(main, args=(args, log, experiment_directory, world_size,), nprocs=world_size)
+        mp.spawn(main, args=(args, experiment_directory, world_size,), nprocs=world_size)
 
     main(0, args)

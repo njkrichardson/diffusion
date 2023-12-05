@@ -23,8 +23,9 @@ class TrainerConfig:
     gradient_scaler: Module
     device_id: int 
     checkpoint_every: int 
-    log: logging.Logger 
+    log: callable
     experiment_directory: Path
+    batch_size: int 
     num_to_sample: Optional[int]=2
     writer: Optional[SummaryWriter]=None
     distributed: Optional[bool]=False
@@ -50,11 +51,11 @@ class Trainer:
 
         self.dataloader: DataLoader = self.config.dataloader
         self.ema: Module = self.config.ema 
-        self.ema_model: Module = self.config.ema_model
+        self.ema_model: Module = self.config.ema_model.to(self.config.device_id)
         self.gradient_scaler: Module = self.config.gradient_scaler
         self.device_id: int = self.config.device_id
         self.checkpoint_every: int = self.config.checkpoint_every
-        self.log: logging.Logger = self.config.log 
+        self.log: callable = self.config.log 
         self.writer = self.config.writer 
 
     def _run_batch(self, batch: Tensor) -> None: 
@@ -82,8 +83,8 @@ class Trainer:
         self.gradient_scaler.update()
 
     def _save_checkpoint(self, step: int): 
-        if step != 0 and step % self.config.sample_every == 0 and self.device_id == 0:
-            milestone: int = step // self.config.sample_every
+        if step != 0 and step % self.config.checkpoint_every == 0 and self.device_id == 0:
+            milestone: int = step // self.config.checkpoint_every
             num_samples: int = self.config.num_to_sample ** 2
             batches = num_to_groups(num_samples, self.config.batch_size)
 
@@ -106,8 +107,7 @@ class Trainer:
         for step in range(num_steps): 
             self._run_step(step) 
 
-            self.log.info(f"GPU{self.config.device_id} | Iteration [{step:05d}/{num_steps:05d}] | Objective: {self.current_objective:0.4f}")
-            print(f"GPU{self.config.device_id} | Iteration [{step:05d}/{num_steps:05d}] | Objective: {self.current_objective:0.4f}")
+            self.log(f"GPU{self.config.device_id} | Iteration [{step:05d}/{num_steps:05d}] | Batch size: {self.config.batch_size} | Objective: {self.current_objective:0.4f}")
 
             if self.writer is not None: 
                 self.writer.scalar("Objective", self.current_objective, step=step)
