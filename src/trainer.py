@@ -5,11 +5,14 @@ import os
 from typing import List, Optional
 
 from einops import rearrange
+import tqdm 
 import torch 
 from torch.utils.data import Dataset, DataLoader 
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP 
-from torch.distributed.fsdp import FullyShardedDataParallel, CPUOffload
+import torch.distributed as dist
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fully_sharded_data_parallel import CPUOffload, BackwardPrefetch
 
 from constants import Module, Optimizer, Tensor
 from custom_tensorboard import SummaryWriter
@@ -32,6 +35,7 @@ class TrainerConfig:
     # Compute and distributed training
     checkpoint_every: int 
     distributed: bool
+    sharding_policy: callable 
 
     # Diagnostics 
     log: callable
@@ -79,7 +83,6 @@ class DataParallelTrainer:
 
         if self.config.distributed: 
             self.model = DDP(self.model, device_ids=[self.local_rank])
-            self.model = FullyShardedDataParallel(self.model(), fsdp_auto_wrap_policy=default_auto_wrap_policy, cpu_offload=CPUOffload(offload_params=True))
 
 
     def _load_snapshot(self, snapshot_path: Path) -> None: 
@@ -165,8 +168,8 @@ class DataParallelTrainer:
             if step != 0 and step % self.config.checkpoint_every == 0:
                 self._save_snapshot(step)
 
-class DataParallelTrainer: 
-    """Generic training class with support for distributed data parallelism.
+class ShardedTrainer: 
+    """Generic training class with support for fully-sharded model and data parallelism.
     """
     def __init__(self, config: TrainerConfig): 
         self.config = config 
@@ -198,7 +201,7 @@ class DataParallelTrainer:
 
         if self.config.distributed: 
             self.model = DDP(self.model, device_ids=[self.local_rank])
-            self.model = FullyShardedDataParallel(self.model(), fsdp_auto_wrap_policy=default_auto_wrap_policy, cpu_offload=CPUOffload(offload_params=True))
+            self.model = FSDP(self.model(), fsdp_auto_wrap_policy=self.config.sharding_policy, cpu_offload=CPUOffload(offload_params=True))
 
 
     def _load_snapshot(self, snapshot_path: Path) -> None: 
@@ -217,32 +220,9 @@ class DataParallelTrainer:
         self.model.to(self.local_rank)
         self.ema_model.to(self.local_rank)
 
-    def _run_batch(self, batch: Tensor) -> None: 
-        objective: Tensor = self.model(
-                batch, 
-                prob_focus_present=self.config.present_focus_probability, 
-                focus_present_mask=self.config.present_focus_mask
-                )
-        scaled_objective: Tensor = self.gradient_scaler.scale(objective / self.config.gradient_accumulate_every)
-        scaled_objective.backward()
-        self.current_objective: float = objective.item()
-
-    def _run_step(self, step: int): 
-        self.optimizer.zero_grad()
-
-        for _ in range(self.config.gradient_accumulate_every):
-            batch: Tensor = next(self.dataloader).to(self.local_rank)
-            self._run_batch(batch) 
-
-        if exists(self.config.max_gradient_norm):
-            self.gradient_scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_gradient_norm)
-
-        self.gradient_scaler.step(self.optimizer)
-        self.gradient_scaler.update()
-
     def _save_snapshot(self, step: int): 
         if step != 0 and step % self.config.checkpoint_every == 0 and self.global_rank == 0:
+            dist.barrier()
             milestone: int = step // self.config.checkpoint_every
             num_samples: int = self.config.num_to_sample ** 2
             batches = num_to_groups(num_samples, self.config.batch_size)
@@ -266,11 +246,37 @@ class DataParallelTrainer:
             torch.save(snapshot, snapshot_path)
             self.log(f"Saved snapshot to: {snapshot_path.as_posix()}")
 
+    def _run_batch(self, batch: Tensor) -> None: 
+        objective: Tensor = self.model(
+                batch, 
+                prob_focus_present=self.config.present_focus_probability, 
+                focus_present_mask=self.config.present_focus_mask
+                )
+        scaled_objective: Tensor = self.gradient_scaler.scale(objective / self.config.gradient_accumulate_every)
+        scaled_objective.backward()
+        self.current_objective: float = objective.item()
+
+    def _run_step(self, step: int): 
+        self.optimizer.zero_grad()
+        total_objective: Tensor = torch.zeros(1).to(self.local_rank) 
+
+        for _ in range(self.config.gradient_accumulate_every):
+            batch: Tensor = next(self.dataloader).to(self.local_rank)
+            self._run_batch(batch) 
+            total_objective += self.current_objective 
+
+        self.gradient_scaler.step(self.optimizer)
+        self.gradient_scaler.update()
+
+        dist.all_reduce(total_objective, op=dist.ReduceOp.SUM)
+        self.current_objective = total_objective 
+
     def train(self, num_steps: int): 
         for step in range(self.steps_completed, num_steps): 
             self._run_step(step) 
 
-            self.log(f"GPU{self.global_rank} | Iteration [{step:05d}/{num_steps:05d}] | Batch size: {self.config.batch_size} | Objective: {self.current_objective:0.4f}")
+            if self.global_rank == 0: 
+                self.log(f"GPU{self.global_rank} | Iteration [{step:05d}/{num_steps:05d}] | Batch size: {self.config.batch_size} | Objective: {self.current_objective:0.4f}")
 
             if self.writer is not None: 
                 self.writer.scalar("Objective", self.current_objective, step=step)

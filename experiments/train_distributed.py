@@ -19,11 +19,12 @@ import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP 
 from torch.distributed import init_process_group, destroy_process_group
+from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, enable_wrap, wrap
 
 from constants import Module, Tensor
 from custom_datasets import ControlDataset
 from custom_tensorboard import SummaryWriter
-from trainer import TrainerConfig, Trainer
+from trainer import TrainerConfig, DataParallelTrainer, ShardedTrainer
 from train_utils import EMA, CHANNELS_TO_MODE, cycle, seek_all_images, gif_to_tensor, video_tensor_to_gif, num_to_groups, noop, cast_num_frames, identity, exists
 from utils import DATA_DIRECTORY, TENSORBOARD_DIRECTORY, setup_logger, setup_experiment_directory, get_now_str
 
@@ -53,6 +54,7 @@ parser.add_argument("--focus-present", type=float, default=0.)
 parser.add_argument_group(title="Distributed Training")
 parser.add_argument("--distributed", action="store_true", help="Enable multi-gpu training.")
 parser.add_argument("--from-checkpoint", type=str, default=None, help="Path to experiment directory with snapshots.")
+parser.add_argument("--shard-threshold", type=int, default=100, help="Threshold (in units of number of parameters) beyond which a module should be sharded.")
 
 parser.add_argument_group(title="Data")
 parser.add_argument("--data-dir", type=str, default="no_obstacles_64")
@@ -65,10 +67,15 @@ def main(args, experiment_directory):
     log.info("logger online")
     log_fn = log.info 
 
+    world_size = int(os.environ['WORLD_SIZE'])
+    local_rank: int = int(os.environ["LOCAL_RANK"])
+    rank: int = int(os.environ["RANK"])
+
     # configure distributed training 
     if args.distributed: 
         log_fn("running distributed!")
         log_fn(f"Device {os.environ['LOCAL_RANK']} online")
+        log_fn(f"World size: {world_size}")
         ddp_setup()
         log_fn("Set up DDP")
 
@@ -117,7 +124,7 @@ def main(args, experiment_directory):
     assert num_videos >= 1 
 
     if args.distributed: 
-        dataloader: DataLoader = cycle(DataLoader(dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True, sampler=DistributedSampler(dataset)))
+        dataloader: DataLoader = cycle(DataLoader(dataset, num_workers=2, batch_size=args.batch_size, shuffle=False, pin_memory=True, sampler=DistributedSampler(dataset, rank=rank, num_replicas=world_size)))
     else: 
         dataloader: DataLoader = cycle(DataLoader(dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True))
 
@@ -130,6 +137,7 @@ def main(args, experiment_directory):
     max_gradient_norm: float = None
 
     # configure the trainer 
+    sharding_policy: callable = partial(size_based_auto_wrap_policy, min_num_params=args.shard_threshold)
     trainer_config: TrainerConfig = TrainerConfig(
             model=model, 
             dataloader=dataloader, 
