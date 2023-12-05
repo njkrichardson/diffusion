@@ -139,7 +139,6 @@ def main(args, experiment_directory):
             gradient_scaler=gradient_scaler,
             batch_size=args.batch_size, 
             num_to_sample=args.num_to_sample, 
-            device_id=int(os.environ["LOCAL_RANK"]) if args.distributed else torch.cuda.current_device(), 
             checkpoint_every=args.sample_every, 
             distributed=args.distributed, 
             log=log_fn, 
